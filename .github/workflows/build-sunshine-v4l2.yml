@@ -1,0 +1,84 @@
+name: Build Sunshine (V4L2 encoder PR, Ubuntu 24.04 arm64)
+
+# Builds the feat-v4l2-encoder branch (SunshineStream/Sunshine PR #5717) on a
+# native arm64 runner, producing a binary that matches an Ubuntu 24.04 runtime.
+#
+# Why 24.04 and not 22.04: the binary links the build machine's glibc, so the
+# runtime container must be the same major release. 24.04 also brings Mesa 24.x,
+# which removes the old Mesa-23.2 dmabuf/AFBC friction we hit earlier.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat-v4l2-encoder
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout (with submodules, full history for build-deps tags)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          df -h / | tail -1
+
+      - name: Toolchain info
+        run: |
+          uname -m
+          nproc
+          free -h | head -2
+          cmake --version | head -1 || true
+          gcc --version | head -1 || true
+          git -C third-party/build-deps describe --tags --exact-match 2>/dev/null || true
+
+      # --skip-cuda: no NVENC on this box, and CUDA is a ~3 GB download
+      - name: Install build dependencies
+        timeout-minutes: 60
+        run: ./scripts/linux_build.sh --step=deps --skip-cuda
+
+      - name: Configure
+        run: ./scripts/linux_build.sh --step=cmake --skip-cuda
+
+      - name: Build
+        timeout-minutes: 120
+        run: ./scripts/linux_build.sh --step=build --skip-cuda
+
+      # Best effort: the .deb carries the proper asset layout + dependency list.
+      - name: Package (best effort)
+        continue-on-error: true
+        run: ./scripts/linux_build.sh --step=package --skip-cuda
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cp build/sunshine out/sunshine
+          chmod +x out/sunshine
+          file out/sunshine || true
+          ./out/sunshine --version || true
+          ldd out/sunshine > out/ldd.txt || true
+          cat out/ldd.txt
+          if ls build/cpack_artifacts/*.deb >/dev/null 2>&1; then
+            cp build/cpack_artifacts/*.deb out/
+          fi
+          {
+            echo "runner: $(uname -a)"
+            echo "glibc: $(ldd --version | head -1)"
+            echo "commit: $(git rev-parse HEAD)"
+            echo "branch: $(git rev-parse --abbrev-ref HEAD)"
+          } > out/build-info.txt
+          ls -l out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunshine-v4l2-ubuntu2404-arm64
+          path: out/
+          retention-days: 14
